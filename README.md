@@ -201,22 +201,47 @@ npm run build       # compiles to dist/
 
 ## Project layout
 
-```
-prompttrace.ts             # entry point
-src/
-  config.ts                # defaults + config.json + env-var merging
-  logger.ts                # system_prompt.txt + tools.jsonl writers
-  forwarder.ts             # fetch + SSE streaming
-  server.ts                # Express app factory
-test/
-  config.test.ts
-  logger.test.ts
-  forwarder.test.ts
-config.json                # upstream URL + optional overrides
-tsconfig.json              # strict TS config (see below)
-REQUIREMENTS.md
-DESIGN.md
-TASKS.md
+```mermaid
+graph TD
+    Root["prompttrace/<br/>(project root)"]
+
+    Entry["prompttrace.ts<br/>(entry point)"]
+    Config["config.json<br/>(upstream URL + optional overrides)"]
+    Tsconfig["tsconfig.json<br/>(strict TS config)"]
+    Readme["README.md"]
+    Requirements["REQUIREMENTS.md"]
+    Design["DESIGN.md"]
+    Tasks["TASKS.md"]
+
+    Src["src/"]
+    ServerTs["server.ts"]
+    ForwarderTs["forwarder.ts"]
+    LoggerTs["logger.ts"]
+    ConfigTs["config.ts"]
+
+    Test["test/"]
+    ConfigTest["config.test.ts"]
+    LoggerTest["logger.test.ts"]
+    ForwarderTest["forwarder.test.ts"]
+
+    Root --> Entry
+    Root --> Config
+    Root --> Tsconfig
+    Root --> Readme
+    Root --> Requirements
+    Root --> Design
+    Root --> Tasks
+    Root --> Src
+    Root --> Test
+
+    Src --> ServerTs
+    Src --> ForwarderTs
+    Src --> LoggerTs
+    Src --> ConfigTs
+
+    Test --> ConfigTest
+    Test --> LoggerTest
+    Test --> ForwarderTest
 ```
 
 ## TypeScript

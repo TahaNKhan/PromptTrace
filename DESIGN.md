@@ -52,25 +52,59 @@ the request path; logging failures are swallowed and reported to
 
 ## Module Layout
 
-```
-prompttrace/           # project root
-├── prompttrace.ts     # Entry point: starts Express, wires routes
-├── src/
-│   ├── server.ts      # Express app factory + listener
-│   ├── forwarder.ts   # fetch wrapper that streams upstream → client
-│   ├── logger.ts      # system_prompt.txt + tools.jsonl appenders
-│   └── config.ts      # defaults, config.json, env-var parsing, validation
-├── test/
-│   ├── config.test.ts
-│   ├── logger.test.ts
-│   └── forwarder.test.ts
-├── config.json        # upstream URL + optional overrides
-├── tsconfig.json      # strict TypeScript config
-├── package.json       # type: module, deps: express, dev: tsx + types
-├── README.md          # Run instructions, env-var table, TLS notes
-├── REQUIREMENTS.md
-├── DESIGN.md
-└── TASKS.md
+```mermaid
+graph TD
+    Root["prompttrace/<br/>(project root)"]
+
+    Entry["prompttrace.ts<br/>(entry point)"]
+    Config["config.json<br/>(upstream URL + optional overrides)"]
+    Tsconfig["tsconfig.json<br/>(strict TS config)"]
+    PackageJson["package.json<br/>(type: module, deps: express,<br/>dev: tsx + types)"]
+    Readme["README.md"]
+    Requirements["REQUIREMENTS.md"]
+    Design["DESIGN.md"]
+    Tasks["TASKS.md"]
+
+    Src["src/"]
+    ServerTs["server.ts<br/>(Express app factory)"]
+    ForwarderTs["forwarder.ts<br/>(fetch + SSE streaming)"]
+    LoggerTs["logger.ts<br/>(system_prompt.txt + tools.jsonl)"]
+    ConfigTs["config.ts<br/>(defaults + config.json + env)"]
+
+    Test["test/"]
+    ConfigTest["config.test.ts"]
+    LoggerTest["logger.test.ts"]
+    ForwarderTest["forwarder.test.ts"]
+
+    Root --> Entry
+    Root --> Config
+    Root --> Tsconfig
+    Root --> PackageJson
+    Root --> Readme
+    Root --> Requirements
+    Root --> Design
+    Root --> Tasks
+    Root --> Src
+    Root --> Test
+
+    Src --> ServerTs
+    Src --> ForwarderTs
+    Src --> LoggerTs
+    Src --> ConfigTs
+
+    Test --> ConfigTest
+    Test --> LoggerTest
+    Test --> ForwarderTest
+
+    classDef root  fill:#fff3e0,stroke:#f57c00,color:#000
+    classDef dir   fill:#e3f2fd,stroke:#1976d2,color:#000
+    classDef doc   fill:#f3e5f5,stroke:#7b1fa2,color:#000
+    classDef code  fill:#e8f5e9,stroke:#388e3c,color:#000
+
+    class Root root
+    class Src,Test dir
+    class Readme,Requirements,Design,Tasks,Config,Tsconfig,PackageJson,Entry doc
+    class ServerTs,ForwarderTs,LoggerTs,ConfigTs,ConfigTest,LoggerTest,ForwarderTest code
 ```
 
 ### `prompttrace.ts`
@@ -161,30 +195,34 @@ Flow:
 
 ## Data Flow — `/v1/messages`
 
-```
-client POST /v1/messages
-  │
-  ▼
-express raw body parser (50 mb cap)
-  │  rawBody = Buffer
-  ▼
-JSON.parse(rawBody)  ──fail──▶ 400 { error: "invalid json" }
-  │
-  ▼
-logger.logSystemPrompt  (async, best-effort)
-logger.logTools          (async, best-effort)
-  │
-  ▼
-forwardRequest:
-  headers ← filter inbound
-  init = { method, headers, body: rawBody, duplex: 'half' }
-  fetch(upstreamUrl, init)
-  │
-  ▼
-response.body → Readable.fromWeb → res (streamed)
-  │
-  ▼
-client receives SSE stream
+```mermaid
+flowchart TD
+    Req["client POST /v1/messages"]
+    Body["express.rawBody parser<br/>(50 mb cap)<br/>rawBody: Buffer"]
+    Parse["JSON.parse(rawBody)"]
+    Bad["400<br/>{ error: invalid_json }"]
+    Log["logSystemPrompt + logTools<br/>(async, fire-and-forget)"]
+    Fwd["forwardRequest<br/>headers = filter inbound<br/>init = method + headers + body + duplex:half"]
+    Fetch["fetch(upstreamUrl, init)"]
+    Pipe["Readable.fromWeb(response.body)<br/>.pipe(res)<br/>(streamed, no buffering)"]
+    Client["client receives SSE stream"]
+    Err["502<br/>{ error: upstream_unreachable }"]
+
+    Req --> Body --> Parse
+    Parse -- "parse error" --> Bad
+    Parse -- "ok" --> Log
+    Log --> Fwd
+    Fwd --> Fetch
+    Fetch -- "ok" --> Pipe --> Client
+    Fetch -- "network error" --> Err
+
+    classDef fail fill:#ffebee,stroke:#c62828,color:#000
+    classDef ok   fill:#e8f5e9,stroke:#388e3c,color:#000
+    classDef pipe fill:#e3f2fd,stroke:#1976d2,color:#000
+
+    class Bad,Err fail
+    class Client ok
+    class Pipe pipe
 ```
 
 ## API Surface
