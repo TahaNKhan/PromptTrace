@@ -88,7 +88,7 @@ To use it:
 
 Config is resolved from three sources, lowest to highest precedence:
 
-1. **Built-in defaults** (hard-coded in `src/config.mjs`)
+1. **Built-in defaults** (hard-coded in `src/config.ts`)
 2. **`config.json`** at the project root, or at the path given by
    `PROMPTTRACE_CONFIG`. Missing fields fall through to the defaults.
 3. **Environment variables** — these override everything.

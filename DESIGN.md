@@ -25,7 +25,10 @@ memory.
 | Choice                | Rationale                                              |
 | --------------------- | ------------------------------------------------------ |
 | Node.js 18+           | Native `fetch`, `ReadableStream`, no transpile.        |
-| ES Modules            | Required by the prompt; modern syntax.                 |
+| TypeScript (strict)   | Compile-time guarantees on the proxy contract; zero `any`. |
+| `tsx`                 | Runs TS directly — no build step for dev/test.         |
+| `tsc` (build only)    | Emits `dist/` for users who don't want a TS toolchain. |
+| ES Modules            | `"type": "module"`; `.js` extensions in TS imports.    |
 | `express`             | Battle-tested inbound HTTP, easy body parsing.         |
 | Native `fetch`        | Avoids `node-fetch` / `axios` / `undici`; built-in SSE. |
 | `node:fs/promises`    | Append-only log writes, no race conditions.           |
@@ -59,9 +62,9 @@ Thin entry point. Reads config, creates server, listens, installs
 process-level handlers (`uncaughtException`, `unhandledRejection`,
 `SIGINT`).
 
-### `src/config.mjs`
+### `src/config.ts`
 
-Pure function `loadConfig(env = process.env)` returning a frozen object:
+Pure function `loadConfig(env = process.env)` returning a frozen `Config`:
 
 ```
 {
@@ -76,7 +79,7 @@ Pure function `loadConfig(env = process.env)` returning a frozen object:
 Validates that `PORT` is an integer in `[1, 65535]`. Logs a warning if
 `INSECURE_TLS=1` is set.
 
-### `src/logger.mjs`
+### `src/logger.ts`
 
 Exports two functions:
 
@@ -91,9 +94,9 @@ function normalizes it to a printable string. Files are opened with
 single CLI is low. Errors from logging are caught and printed to
 `stderr`; they never propagate.
 
-### `src/forwarder.mjs`
+### `src/forwarder.ts`
 
-Single export: `forwardRequest({ req, res, body, headers, requestId })`.
+Single export: `forwardRequest(args: ForwardRequestArgs)`.
 
 Flow:
 
@@ -120,9 +123,9 @@ Flow:
 5. On `fetch` rejection (network error): respond `502 Bad Gateway` with
    a JSON error body.
 
-### `src/server.mjs`
+### `src/server.ts`
 
-`createApp(config)` returns an Express app:
+`createApp(config: AppConfig)` returns an Express app:
 
 - `express.json({ limit: '50mb' })` — parse JSON for logging purposes
   only. The raw body is also captured using `express.raw({ type: '*/*',
@@ -233,7 +236,7 @@ mutable state between request handlers.
 
 ## Testing Strategy
 
-- **Unit**: `src/logger.mjs` is pure I/O — testable with a temp dir.
+- **Unit**: `src/logger.ts` is pure I/O — testable with a temp dir.
 - **Integration**: spin up the app in-process on an ephemeral port,
   stand up a mock upstream (`http.createServer`) that returns canned
   SSE chunks, and assert:
@@ -251,7 +254,7 @@ mutable state between request handlers.
 ## Deployment / Runtime
 
 - `npm install` once.
-- `node proxy.mjs` (or `npm start`).
+- `npm start` (runs `tsx prompttrace.ts`).
 - Set `ANTHROPIC_BASE_URL=http://localhost:8080` and
   `ANTHROPIC_AUTH_TOKEN=<real key>` (Claude Code uses the env var name
   `ANTHROPIC_AUTH_TOKEN` for the API key; the proxy forwards whatever
@@ -278,11 +281,13 @@ mutable state between request handlers.
 
 ## Implementation Order
 
-1. `package.json` with `type: module` and `express` dep.
-2. `src/config.mjs`.
-3. `src/logger.mjs`.
-4. `src/forwarder.mjs`.
-5. `src/server.mjs`.
-6. `proxy.mjs` entry point.
-7. Tests.
-8. README with run instructions.
+1. `package.json` with `type: module`, runtime dep `express`, and dev
+   deps `tsx` + `typescript` + `@types/node` + `@types/express`.
+2. `tsconfig.json` (strict, NodeNext, no `any`).
+3. `src/config.ts`.
+4. `src/logger.ts`.
+5. `src/forwarder.ts`.
+6. `src/server.ts`.
+7. `prompttrace.ts` entry point.
+8. Tests.
+9. README with run instructions.

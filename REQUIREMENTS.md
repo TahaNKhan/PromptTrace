@@ -20,7 +20,7 @@ for modifying traffic. Logs stay on the local machine.
 
 ## User Stories
 
-1. As an operator, I run `node proxy.mjs` and see "listening on 8080".
+1. As an operator, I run `npm start` (or `npx tsx prompttrace.ts`) and see "listening on 8080".
 2. As an operator, I set `ANTHROPIC_BASE_URL=http://localhost:8080` in my
    shell, then launch the CLI. The CLI makes a request to the proxy.
 3. As an operator, I see the `system` prompt printed to stdout **and**
@@ -69,8 +69,9 @@ for modifying traffic. Logs stay on the local machine.
     the proxy logs a loud warning on startup.
 11. **FR-11** The proxy uses Node.js native `fetch` (Node 18+) to forward
     requests. No third-party HTTP client is required.
-12. **FR-12** The proxy runs as a single Node.js process, uses ES Modules
-    (`"type": "module"`), and has no transpile step.
+12. **FR-12** The proxy runs as a single Node.js process, is written in
+    TypeScript (`"type": "module"`), and runs directly via `tsx` with no
+    compile step in the dev path.
 
 ## Non-Functional Requirements
 
@@ -107,7 +108,7 @@ for modifying traffic. Logs stay on the local machine.
 
 ## Acceptance Criteria
 
-- `node proxy.mjs` boots, prints "listening on 8080", and stays running.
+- `npm start` (or `tsx prompttrace.ts`) boots, prints "listening on 8080", and stays running.
 - A `curl` request to `http://127.0.0.1:8080/v1/messages` with a valid
   body produces a `system_prompt.txt` line and a `tools.jsonl` entry,
   and forwards the response to `curl`.
