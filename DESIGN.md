@@ -2,23 +2,40 @@
 
 ## Architecture Overview
 
-```
-┌──────────────┐         ┌──────────────────────┐         ┌─────────────────────┐
-│  AI CLI      │ ──HTTP──▶  PromptTrace         │ ──HTTPS──▶  api.minimax.io     │
-│  (client)    │ ◀──SSE───  127.0.0.1:8080      │ ◀──SSE───  /anthropic/v1/... │
-└──────────────┘         └──────────────────────┘         └─────────────────────┘
-                                  │
-                                  │ (append)
-                                  ▼
-                         system_prompt.txt
-                         tools.jsonl
+```mermaid
+flowchart LR
+    CLI["AI CLI<br/>(Claude Code, aider, …)"]
+    Proxy["PromptTrace<br/>127.0.0.1:8080<br/>Node + Express"]
+    Upstream["Upstream API<br/>api.anthropic.com<br/>or config.json override"]
+    SystemLog["system_prompt.txt"]
+    ToolsLog["tools.jsonl"]
+
+    CLI -- "HTTP POST /v1/messages" --> Proxy
+    Proxy -- "fetch(HTTPS) /v1/messages" --> Upstream
+    Upstream -- "SSE chunks" --> Proxy
+    Proxy -- "SSE chunks (streamed, no buffering)" --> CLI
+
+    Proxy -. "append (async)" .-> SystemLog
+    Proxy -. "append (async)" .-> ToolsLog
+
+    classDef client fill:#e3f2fd,stroke:#1976d2,color:#000
+    classDef proxy  fill:#fff3e0,stroke:#f57c00,color:#000
+    classDef api    fill:#f3e5f5,stroke:#7b1fa2,color:#000
+    classDef log    fill:#e8f5e9,stroke:#388e3c,color:#000
+
+    class CLI client
+    class Proxy proxy
+    class Upstream api
+    class SystemLog,ToolsLog log
 ```
 
 A single Node.js process hosts one Express HTTP server. Each inbound
-request is parsed, logged, then forwarded to Anthropic via native
-`fetch`. The upstream response body is piped back to the client using a
-Web `ReadableStream` adapter so the proxy never holds the full body in
-memory.
+request is parsed, logged, then forwarded to the upstream API via
+native `fetch`. The upstream response body is piped back to the client
+using a Web `ReadableStream` adapter so the proxy never holds the
+full body in memory. Logs are written asynchronously and never block
+the request path; logging failures are swallowed and reported to
+`stderr`.
 
 ## Tech Stack
 
