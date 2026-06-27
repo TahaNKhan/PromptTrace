@@ -1,0 +1,21 @@
+{
+  "name": "prompttrace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local reverse proxy that logs system prompts and tool definitions from AI CLI tools before forwarding to an Anthropic-compatible API.",
+  "type": "module",
+  "main": "prompttrace.mjs",
+  "bin": {
+    "prompttrace": "prompttrace.mjs"
+  },
+  "scripts": {
+    "start": "node prompttrace.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

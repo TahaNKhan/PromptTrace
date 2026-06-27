@@ -1,0 +1,348 @@
+// test/forwarder.test.mjs
+//
+// Integration tests for the full request path. We stand up:
+//   * a real upstream HTTP server on an ephemeral port (mock Anthropic)
+//   * the proxy's Express app, configured to forward to it
+// then make HTTP requests against the proxy and assert behavior.
+
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { createApp, listen } from '../src/server.mjs';
+
+/**
+ * Spin up a mock upstream HTTP server. Returns `{ port, server, chunks }`
+ * where `chunks` records every chunk the server wrote.
+ */
+function startMockUpstream(handler) {
+  return new Promise((resolveP) => {
+    const chunks = [];
+    const timings = [];
+    const server = http.createServer((req, res) => {
+      const buffers = [];
+      req.on('data', (c) => buffers.push(c));
+      req.on('end', async () => {
+        const rawBody = Buffer.concat(buffers);
+        await handler({
+          req,
+          res,
+          method: req.method,
+          url: req.url,
+          headers: req.headers,
+          rawBody,
+          recordChunk: (chunk) => {
+            chunks.push(chunk);
+            timings.push(Date.now());
+          },
+        });
+      });
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      resolveP({ port, server, chunks, timings });
+    });
+  });
+}
+
+async function get(url) {
+  return new Promise((resolveP, rejectP) => {
+    http.get(url, (res) => {
+      const chunks = [];
+      const timings = [];
+      res.on('data', (c) => {
+        chunks.push(c);
+        timings.push(Date.now());
+      });
+      res.on('end', () => {
+        resolveP({
+          status: res.statusCode,
+          headers: res.headers,
+          body: Buffer.concat(chunks).toString('utf8'),
+          chunks,
+          timings,
+        });
+      });
+      res.on('error', rejectP);
+    }).on('error', rejectP);
+  });
+}
+
+async function post(url, body, headers = {}) {
+  return new Promise((resolveP, rejectP) => {
+    const data = typeof body === 'string' ? Buffer.from(body) : body;
+    const req = http.request(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'content-length': data.length,
+          ...headers,
+        },
+      },
+      (res) => {
+        const chunks = [];
+        const timings = [];
+        res.on('data', (c) => {
+          chunks.push(c);
+          timings.push(Date.now());
+        });
+        res.on('end', () => {
+          resolveP({
+            status: res.statusCode,
+            headers: res.headers,
+            body: Buffer.concat(chunks).toString('utf8'),
+            chunks,
+            timings,
+          });
+        });
+        res.on('error', rejectP);
+      },
+    );
+    req.on('error', rejectP);
+    req.write(data);
+    req.end();
+  });
+}
+
+describe('proxy integration', () => {
+  /** @type {import('http').Server} */
+  let upstream;
+  let upstreamPort;
+  let proxy;
+  let proxyServer;
+  let proxyPort;
+  /** @type {string} */
+  let logDir;
+
+  before(async () => {
+    logDir = await mkdtemp(join(tmpdir(), 'prompttrace-int-'));
+    const mock = await startMockUpstream(async ({ res, recordChunk }) => {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+      });
+      // Stream 3 chunks over time so we can assert non-buffering.
+      for (let i = 0; i < 3; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+        const chunk = `event: ping\ndata: ${i}\n\n`;
+        res.write(chunk);
+        recordChunk(chunk);
+      }
+      res.end();
+    });
+    upstream = mock.server;
+    upstreamPort = mock.port;
+
+    const app = createApp({
+      upstreamUrl: `http://127.0.0.1:${upstreamPort}`,
+      insecureTls: false,
+      logDir,
+    });
+    proxy = app;
+    proxyServer = await listen(proxy, { port: 0, host: '127.0.0.1' });
+    proxyPort = proxyServer.address().port;
+  });
+
+  after(async () => {
+    proxyServer.close();
+    upstream.close();
+    await rm(logDir, { recursive: true, force: true });
+  });
+
+  it('streams chunks back to client (no buffering)', async () => {
+    const t0 = Date.now();
+    const res = await post(`http://127.0.0.1:${proxyPort}/v1/messages`, '{}', {
+      'content-type': 'application/json',
+      'x-api-key': 'test-key',
+    });
+    const totalElapsed = Date.now() - t0;
+
+    assert.equal(res.status, 200);
+    assert.match(res.body, /data: 0/);
+    assert.match(res.body, /data: 1/);
+    assert.match(res.body, /data: 2/);
+
+    // If we were buffering, totalElapsed would be ~75ms (3 × 25ms wait
+    // before any chunk). With streaming, the client starts receiving
+    // chunks as they arrive, and total elapsed is at least 75ms but
+    // the inter-chunk gaps should be roughly 25ms each.
+    assert.ok(res.chunks.length >= 3, 'client should receive ≥3 chunks');
+    if (res.chunks.length >= 2) {
+      const gap = res.timings[1] - res.timings[0];
+      // Generous lower bound — just confirm streaming happened and
+      // wasn't collapsed into a single write.
+      assert.ok(gap >= 5, `expected a gap between chunks, got ${gap}ms`);
+    }
+    assert.ok(totalElapsed >= 60, `expected ≥60ms total, got ${totalElapsed}ms`);
+  });
+
+  it('forwards system prompt to system_prompt.txt', async () => {
+    const body = JSON.stringify({
+      model: 'claude-test',
+      system: 'You are a helpful assistant.',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    await post(`http://127.0.0.1:${proxyPort}/v1/messages`, body, {
+      'content-type': 'application/json',
+      'x-api-key': 'test-key',
+    });
+    // Give the logger a moment to flush.
+    await new Promise((r) => setTimeout(r, 50));
+    const file = await readFile(join(logDir, 'system_prompt.txt'), 'utf8');
+    assert.match(file, /You are a helpful assistant\./);
+  });
+
+  it('forwards tool definitions to tools.jsonl', async () => {
+    const body = JSON.stringify({
+      model: 'claude-test',
+      system: 'tools test',
+      tools: [
+        { name: 'Read', description: 'Read a file', input_schema: {} },
+        { name: 'Write', description: 'Write a file', input_schema: {} },
+      ],
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    await post(`http://127.0.0.1:${proxyPort}/v1/messages`, body, {
+      'content-type': 'application/json',
+      'x-api-key': 'test-key',
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    const file = await readFile(join(logDir, 'tools.jsonl'), 'utf8');
+    const lines = file.trim().split('\n').map((l) => JSON.parse(l));
+    const last = lines[lines.length - 1];
+    assert.equal(last.tools.length, 2);
+    assert.equal(last.tools[0].name, 'Read');
+    assert.equal(last.tools[1].name, 'Write');
+  });
+
+  it('returns 400 on malformed JSON', async () => {
+    const res = await post(
+      `http://127.0.0.1:${proxyPort}/v1/messages`,
+      'not valid json{',
+      { 'content-type': 'application/json', 'x-api-key': 'test-key' },
+    );
+    assert.equal(res.status, 400);
+    const parsed = JSON.parse(res.body);
+    assert.equal(parsed.error, 'invalid_json');
+  });
+
+  it('forwards x-api-key header to upstream', async () => {
+    let observedKey = null;
+    const capture = await startMockUpstream(async ({ res, headers }) => {
+      observedKey = headers['x-api-key'];
+      res.writeHead(204);
+      res.end();
+    });
+    try {
+      const localApp = createApp({
+        upstreamUrl: `http://127.0.0.1:${capture.port}`,
+        insecureTls: false,
+        logDir,
+      });
+      const localServer = await listen(localApp, { port: 0, host: '127.0.0.1' });
+      const localPort = localServer.address().port;
+      try {
+        await post(`http://127.0.0.1:${localPort}/v1/messages`, '{}', {
+          'content-type': 'application/json',
+          'x-api-key': 'sk-test-12345',
+        });
+        assert.equal(observedKey, 'sk-test-12345');
+      } finally {
+        localServer.close();
+      }
+    } finally {
+      capture.server.close();
+    }
+  });
+
+  it('preserves the upstream URL path prefix (e.g. /anthropic)', async () => {
+    let observedUrl = null;
+    const capture = await startMockUpstream(async ({ res, url }) => {
+      observedUrl = url;
+      res.writeHead(200);
+      res.end('ok');
+    });
+    try {
+      const localApp = createApp({
+        // Mimic the default — MiniMax exposes the Anthropic API at /anthropic.
+        upstreamUrl: `http://127.0.0.1:${capture.port}/anthropic`,
+        insecureTls: false,
+        logDir,
+      });
+      const localServer = await listen(localApp, { port: 0, host: '127.0.0.1' });
+      const localPort = localServer.address().port;
+      try {
+        await post(`http://127.0.0.1:${localPort}/v1/messages`, '{}', {
+          'content-type': 'application/json',
+          'x-api-key': 'sk-test',
+        });
+        assert.equal(observedUrl, '/anthropic/v1/messages');
+      } finally {
+        localServer.close();
+      }
+    } finally {
+      capture.server.close();
+    }
+  });
+
+  it('forwards non-/v1/messages paths verbatim (no logging)', async () => {
+    const res = await get(`http://127.0.0.1:${proxyPort}/v1/models`);
+    assert.equal(res.status, 200);
+    assert.match(res.body, /data: 0/);
+  });
+
+  it('returns 502 when upstream is unreachable', async () => {
+    // Pick a port that's almost certainly free, then don't bind it.
+    const localApp = createApp({
+      upstreamUrl: 'http://127.0.0.1:1', // port 1 is reserved
+      insecureTls: false,
+      logDir,
+    });
+    const localServer = await listen(localApp, { port: 0, host: '127.0.0.1' });
+    const localPort = localServer.address().port;
+    try {
+      const res = await post(`http://127.0.0.1:${localPort}/v1/messages`, '{}', {
+        'content-type': 'application/json',
+        'x-api-key': 'test-key',
+      });
+      assert.equal(res.status, 502);
+      const parsed = JSON.parse(res.body);
+      assert.equal(parsed.error, 'upstream_unreachable');
+    } finally {
+      localServer.close();
+    }
+  });
+
+  it('forwards upstream non-2xx body unchanged', async () => {
+    const mock = await startMockUpstream(async ({ res }) => {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+    });
+    try {
+      const localApp = createApp({
+        upstreamUrl: `http://127.0.0.1:${mock.port}`,
+        insecureTls: false,
+        logDir,
+      });
+      const localServer = await listen(localApp, { port: 0, host: '127.0.0.1' });
+      const localPort = localServer.address().port;
+      try {
+        const res = await post(`http://127.0.0.1:${localPort}/v1/messages`, '{}', {
+          'content-type': 'application/json',
+          'x-api-key': 'wrong',
+        });
+        assert.equal(res.status, 401);
+        const parsed = JSON.parse(res.body);
+        assert.equal(parsed.error, 'unauthorized');
+      } finally {
+        localServer.close();
+      }
+    } finally {
+      mock.server.close();
+    }
+  });
+});
