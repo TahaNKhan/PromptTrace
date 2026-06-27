@@ -1,4 +1,5 @@
 node_modules/
+dist/
 system_prompt.txt
 tools.jsonl
 *.log

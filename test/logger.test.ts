@@ -1,6 +1,6 @@
-// test/logger.test.mjs
+// test/logger.test.ts
 //
-// Unit tests for src/logger.mjs. No fixtures on disk — we point the
+// Unit tests for src/logger.ts. No fixtures on disk — we point the
 // logger at a temp dir per test.
 
 import { describe, it, before, after, beforeEach } from 'node:test';
@@ -9,7 +9,12 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { normalizeSystem, summarizeTools, logSystemPrompt, logTools } from '../src/logger.mjs';
+import {
+  normalizeSystem,
+  summarizeTools,
+  logSystemPrompt,
+  logTools,
+} from '../src/logger.js';
 
 describe('normalizeSystem', () => {
   it('returns "" for null / undefined', () => {
@@ -64,14 +69,13 @@ describe('summarizeTools', () => {
 
   it('uses <unnamed> for entries without a name', () => {
     const result = summarizeTools([{ description: 'no name' }, null]);
-    assert.equal(result[0].name, '<unnamed>');
-    assert.equal(result[1].name, '<unnamed>');
+    assert.equal(result[0]?.name, '<unnamed>');
+    assert.equal(result[1]?.name, '<unnamed>');
   });
 });
 
 describe('logSystemPrompt + logTools', () => {
-  /** @type {string} */
-  let dir;
+  let dir = '';
 
   before(async () => {
     dir = await mkdtemp(join(tmpdir(), 'prompttrace-'));
@@ -82,7 +86,6 @@ describe('logSystemPrompt + logTools', () => {
   });
 
   beforeEach(async () => {
-    // Clean log files between tests so we can assert exact contents.
     await rm(join(dir, 'system_prompt.txt'), { force: true });
     await rm(join(dir, 'tools.jsonl'), { force: true });
   });
@@ -116,11 +119,13 @@ describe('logSystemPrompt + logTools', () => {
       logDir: dir,
     });
     const file = await readFile(join(dir, 'tools.jsonl'), 'utf8');
-    const lines = file.trim().split('\n').map((l) => JSON.parse(l));
+    const lines = file.trim().split('\n').map((l) => JSON.parse(l) as unknown);
     assert.equal(lines.length, 2);
-    assert.deepEqual(lines[0].tools, [{ name: 'Read', description: 'Read a file' }]);
-    assert.equal(lines[1].tools.length, 2);
-    assert.equal(lines[1].tools[0].name, 'Write');
+    const first = lines[0] as { tools: Array<{ name: string; description: string }> };
+    assert.deepEqual(first.tools, [{ name: 'Read', description: 'Read a file' }]);
+    const second = lines[1] as { tools: Array<{ name: string }> };
+    assert.equal(second.tools.length, 2);
+    assert.equal(second.tools[0]?.name, 'Write');
   });
 
   it('appends, never overwrites', async () => {

@@ -22,14 +22,23 @@ CLI without buffering.
 npm install
 ```
 
-That's it — there's only one runtime dependency (`express`).
+That installs the one runtime dependency (`express`) and the dev
+toolchain (`tsx`, `typescript`, `@types/node`, `@types/express`).
 
 ## Run
 
 ```sh
 npm start
 # or:
-node prompttrace.mjs
+npx tsx prompttrace.ts
+```
+
+The proxy runs directly from TypeScript via `tsx` — no separate
+build step required. If you'd rather compile to JS first:
+
+```sh
+npm run build     # writes dist/
+node dist/prompttrace.js
 ```
 
 You'll see (assuming the shipped `config.json`):
@@ -185,27 +194,37 @@ listener.
 ## Development
 
 ```sh
-npm test          # runs node --test on test/
+npm test            # runs tsx --test on test/*.test.ts
+npm run typecheck   # strict tsc --noEmit
+npm run build       # compiles to dist/
 ```
 
 ## Project layout
 
 ```
-prompttrace.mjs           # entry point
+prompttrace.ts             # entry point
 src/
-  config.mjs              # defaults + config.json + env-var merging
-  logger.mjs              # system_prompt.txt + tools.jsonl writers
-  forwarder.mjs           # fetch + SSE streaming
-  server.mjs              # Express app factory
+  config.ts                # defaults + config.json + env-var merging
+  logger.ts                # system_prompt.txt + tools.jsonl writers
+  forwarder.ts             # fetch + SSE streaming
+  server.ts                # Express app factory
 test/
-  config.test.mjs
-  logger.test.mjs
-  forwarder.test.mjs
-config.json               # upstream URL + optional overrides
+  config.test.ts
+  logger.test.ts
+  forwarder.test.ts
+config.json                # upstream URL + optional overrides
+tsconfig.json              # strict TS config (see below)
 REQUIREMENTS.md
 DESIGN.md
 TASKS.md
 ```
+
+## TypeScript
+
+The project is strict TypeScript with `noUncheckedIndexedAccess`,
+`exactOptionalPropertyTypes`, and zero `any`. `tsx` runs the source
+directly; `npm run typecheck` enforces the rules in CI; `npm run build`
+emits plain JS to `dist/` for users who don't want a TS toolchain.
 
 ## License
 

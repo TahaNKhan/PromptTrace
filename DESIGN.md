@@ -34,25 +34,26 @@ memory.
 
 ```
 prompttrace/           # project root
-├── prompttrace.mjs    # Entry point: starts Express, wires routes
+├── prompttrace.ts     # Entry point: starts Express, wires routes
 ├── src/
-│   ├── server.mjs     # Express app factory + listener
-│   ├── forwarder.mjs  # fetch wrapper that streams upstream → client
-│   ├── logger.mjs     # system_prompt.txt + tools.jsonl appenders
-│   └── config.mjs     # defaults, config.json, env-var parsing, validation
+│   ├── server.ts      # Express app factory + listener
+│   ├── forwarder.ts   # fetch wrapper that streams upstream → client
+│   ├── logger.ts      # system_prompt.txt + tools.jsonl appenders
+│   └── config.ts      # defaults, config.json, env-var parsing, validation
 ├── test/
-│   ├── config.test.mjs
-│   ├── logger.test.mjs
-│   └── forwarder.test.mjs
+│   ├── config.test.ts
+│   ├── logger.test.ts
+│   └── forwarder.test.ts
 ├── config.json        # upstream URL + optional overrides
-├── package.json       # type: module, deps: express
+├── tsconfig.json      # strict TypeScript config
+├── package.json       # type: module, deps: express, dev: tsx + types
 ├── README.md          # Run instructions, env-var table, TLS notes
 ├── REQUIREMENTS.md
 ├── DESIGN.md
 └── TASKS.md
 ```
 
-### `prompttrace.mjs`
+### `prompttrace.ts`
 
 Thin entry point. Reads config, creates server, listens, installs
 process-level handlers (`uncaughtException`, `unhandledRejection`,

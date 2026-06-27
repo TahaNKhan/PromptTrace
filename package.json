@@ -4,18 +4,26 @@
   "private": true,
   "description": "Local reverse proxy that logs system prompts and tool definitions from AI CLI tools before forwarding to an Anthropic-compatible API.",
   "type": "module",
-  "main": "prompttrace.mjs",
+  "main": "prompttrace.ts",
   "bin": {
-    "prompttrace": "prompttrace.mjs"
+    "prompttrace": "prompttrace.ts"
   },
   "scripts": {
-    "start": "node prompttrace.mjs",
-    "test": "node --test test/*.test.mjs"
+    "start": "tsx prompttrace.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
   },
   "engines": {
     "node": ">=18.17.0"
   },
   "dependencies": {
     "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.12.7",
+    "tsx": "^4.7.2",
+    "typescript": "^5.4.5"
   }
 }

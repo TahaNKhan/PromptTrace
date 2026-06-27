@@ -1,4 +1,4 @@
-// src/forwarder.mjs
+// src/forwarder.ts
 //
 // Streams a request from the inbound HTTP response (Express `req`/`res`)
 // to an upstream URL and pipes the upstream response back to `res`.
@@ -19,29 +19,46 @@
 //   * Hop-by-hop headers are stripped in both directions.
 
 import { Readable } from 'node:stream';
-import { HOP_BY_HOP_HEADERS } from './config.mjs';
+import type { Agent as HttpsAgent } from 'node:https';
+import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
+import { HOP_BY_HOP_HEADERS } from './config.js';
+
+export interface ForwardRequestArgs {
+  readonly upstreamOrigin: string;
+  readonly method: string;
+  readonly inboundPath: string;
+  readonly inboundQuery: string;
+  readonly headers: ExpressRequest['headers'];
+  readonly rawBody: Buffer | null;
+  readonly res: ExpressResponse;
+  readonly insecureTls: boolean;
+  readonly requestId: string;
+}
 
 /**
  * Build the upstream URL by combining the configured upstream origin
  * with the inbound path + query.
- *
- * @param {string} upstreamOrigin e.g. 'https://api.anthropic.com'
- * @param {string} inboundPath    e.g. '/v1/messages'
- * @param {string} [inboundQuery]  e.g. '?beta=foo'
  */
-export function buildUpstreamUrl(upstreamOrigin, inboundPath, inboundQuery = '') {
+export function buildUpstreamUrl(
+  upstreamOrigin: string,
+  inboundPath: string,
+  inboundQuery = '',
+): string {
   const origin = upstreamOrigin.replace(/\/+$/, '');
   const path = inboundPath.startsWith('/') ? inboundPath : `/${inboundPath}`;
-  return `${origin}${path}${inboundQuery ?? ''}`;
+  return `${origin}${path}${inboundQuery}`;
 }
+
+type HeaderValue = string | string[];
+type FilteredHeaders = Record<string, HeaderValue>;
 
 /**
  * Filter headers: lowercase keys, drop hop-by-hop, return a plain object.
- *
- * @param {NodeJS.Dict<string | string[]>} inbound
  */
-function filterRequestHeaders(inbound) {
-  const out = {};
+function filterRequestHeaders(
+  inbound: ExpressRequest['headers'],
+): FilteredHeaders {
+  const out: FilteredHeaders = {};
   for (const [key, value] of Object.entries(inbound)) {
     const lower = key.toLowerCase();
     if (HOP_BY_HOP_HEADERS.has(lower)) continue;
@@ -51,15 +68,18 @@ function filterRequestHeaders(inbound) {
   return out;
 }
 
+const HOP_BY_HOP = HOP_BY_HOP_HEADERS;
+
 /**
  * Copy upstream response headers to the client, stripping hop-by-hop.
- *
- * @param {Headers} upstreamHeaders
- * @param {import('express').Response} res
  */
-function pipeResponseHeaders(upstreamHeaders, res) {
-  for (const [key, value] of upstreamHeaders.entries()) {
-    if (HOP_BY_HOP_HEADERS.has(key.toLowerCase())) continue;
+function pipeResponseHeaders(
+  upstreamHeaders: Headers,
+  res: ExpressResponse,
+): void {
+  // undici's Headers is iterable as [string, string][].
+  for (const [key, value] of upstreamHeaders as unknown as Iterable<readonly [string, string]>) {
+    if (HOP_BY_HOP.has(key.toLowerCase())) continue;
     // Native fetch transparently decompresses gzip and leaves the
     // Content-Encoding header in place. Strip it so the client sees
     // plain-text SSE.
@@ -71,22 +91,8 @@ function pipeResponseHeaders(upstreamHeaders, res) {
 /**
  * Forward an inbound request to the upstream URL and stream the
  * response back to `res`.
- *
- * @param {{
- *   upstreamOrigin: string,
- *   method: string,
- *   inboundPath: string,
- *   inboundQuery: string,
- *   headers: NodeJS.Dict<string | string[]>,
- *   rawBody: Buffer | null,
- *   req: import('express').Request,
- *   res: import('express').Response,
- *   insecureTls: boolean,
- *   requestId: string,
- * }} args
- * @returns {Promise<void>} resolves when the stream finishes or fails.
  */
-export async function forwardRequest(args) {
+export async function forwardRequest(args: ForwardRequestArgs): Promise<void> {
   const {
     upstreamOrigin,
     method,
@@ -104,40 +110,52 @@ export async function forwardRequest(args) {
 
   const controller = new AbortController();
 
-  /** @type {RequestInit} */
-  const init = {
+  const baseInit: RequestInit = {
     method,
-    headers: filteredHeaders,
+    headers: filteredHeaders as unknown as Headers,
     signal: controller.signal,
   };
 
-  if (rawBody && rawBody.length > 0 && method !== 'GET' && method !== 'HEAD') {
-    init.body = rawBody;
-    // undici requires `duplex: 'half'` whenever a streaming body is set;
-    // a Buffer is fine, but the option is harmless and future-proof.
-    init.duplex = 'half';
-  }
+  const hasBody =
+    rawBody !== null && rawBody.length > 0 && method !== 'GET' && method !== 'HEAD';
+
+  // undici requires `duplex: 'half'` whenever a streaming body is set;
+  // a Buffer is fine, but the option is harmless and future-proof.
+  // We cast through `any`-equivalent because the DOM-flavored
+  // RequestInit doesn't know about `body` being a Buffer or about
+  // `duplex`. Both are valid at runtime under undici.
+  type UndiciInit = RequestInit & { body?: unknown; duplex?: 'half' | 'full' };
+  const init: RequestInit = (
+    hasBody
+      ? { ...baseInit, body: rawBody, duplex: 'half' as const }
+      : baseInit
+  ) as UndiciInit as RequestInit;
 
   if (insecureTls) {
     // Disable cert verification. This is a last resort and triggers the
-    // startup warning in config.mjs.
+    // startup warning in config.ts.
     const { Agent } = await import('node:https');
-    init.agent = new Agent({ rejectUnauthorized: false });
+    const agent = new Agent({ rejectUnauthorized: false });
+    // `RequestInit` in @types/node doesn't expose `agent` directly —
+    // it's an undici extension. Cast through unknown to attach it.
+    (init as RequestInit & { agent: HttpsAgent }).agent = agent;
   }
 
-  let response;
+  let response: Response;
   try {
     response = await fetch(url, init);
   } catch (err) {
+    const error = err as Error;
     if (!res.headersSent) {
-      const detail = err.name === 'AbortError' ? 'client_disconnected' : err.message;
-      const status = err.name === 'AbortError' ? 499 : 502;
+      const isAbort = error.name === 'AbortError';
+      const detail = isAbort ? 'client_disconnected' : error.message;
+      const status = isAbort ? 499 : 502;
       res.status(status).json({
-        error: err.name === 'AbortError' ? 'client_disconnected' : 'upstream_unreachable',
+        error: isAbort ? 'client_disconnected' : 'upstream_unreachable',
         detail,
       });
     } else {
-      res.destroy(err);
+      res.destroy(error);
     }
     return;
   }
@@ -165,25 +183,27 @@ export async function forwardRequest(args) {
     }
   });
 
-  const nodeStream = Readable.fromWeb(response.body);
+  const nodeStream = Readable.fromWeb(
+    response.body as unknown as Parameters<typeof Readable.fromWeb>[0],
+  );
   nodeStream.pipe(res);
 
-  await new Promise((resolveP) => {
+  await new Promise<void>((resolveP) => {
     let done = false;
-    const finish = () => {
+    const finish = (): void => {
       if (done) return;
       done = true;
       resolveP();
     };
     nodeStream.on('end', finish);
     nodeStream.on('close', finish);
-    nodeStream.on('error', (err) => {
+    nodeStream.on('error', (err: Error) => {
       process.stderr.write(
         `[prompttrace] upstream stream error — ${requestId}: ${err.message}\n`,
       );
       finish();
     });
-    res.on('error', (err) => {
+    res.on('error', (err: Error) => {
       process.stderr.write(
         `[prompttrace] client socket error — ${requestId}: ${err.message}\n`,
       );
@@ -191,8 +211,6 @@ export async function forwardRequest(args) {
     });
   });
 
-  // If the upstream finished but res was destroyed (e.g. the client
-  // bailed after the last chunk), make sure we don't try to end it.
   if (clientGone) return;
   if (!res.writableEnded) {
     res.end();

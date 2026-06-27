@@ -1,4 +1,4 @@
-// test/forwarder.test.mjs
+// test/forwarder.test.ts
 //
 // Integration tests for the full request path. We stand up:
 //   * a real upstream HTTP server on an ephemeral port (mock Anthropic)
@@ -8,33 +8,49 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createApp, listen } from '../src/server.mjs';
+import { createApp, listen } from '../src/server.js';
 
-/**
- * Spin up a mock upstream HTTP server. Returns `{ port, server, chunks }`
- * where `chunks` records every chunk the server wrote.
- */
-function startMockUpstream(handler) {
+interface MockHandlerArgs {
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+  method: string;
+  url: string;
+  headers: http.IncomingHttpHeaders;
+  rawBody: Buffer;
+  recordChunk: (chunk: string) => void;
+}
+
+type MockHandler = (args: MockHandlerArgs) => Promise<void> | void;
+
+interface MockUpstream {
+  port: number;
+  server: http.Server;
+  chunks: string[];
+  timings: number[];
+}
+
+function startMockUpstream(handler: MockHandler): Promise<MockUpstream> {
   return new Promise((resolveP) => {
-    const chunks = [];
-    const timings = [];
+    const chunks: string[] = [];
+    const timings: number[] = [];
     const server = http.createServer((req, res) => {
-      const buffers = [];
-      req.on('data', (c) => buffers.push(c));
-      req.on('end', async () => {
+      const buffers: Buffer[] = [];
+      req.on('data', (c: Buffer) => buffers.push(c));
+      req.on('end', () => {
         const rawBody = Buffer.concat(buffers);
-        await handler({
+        void handler({
           req,
           res,
-          method: req.method,
-          url: req.url,
+          method: req.method ?? 'GET',
+          url: req.url ?? '/',
           headers: req.headers,
           rawBody,
-          recordChunk: (chunk) => {
+          recordChunk: (chunk: string) => {
             chunks.push(chunk);
             timings.push(Date.now());
           },
@@ -42,36 +58,61 @@ function startMockUpstream(handler) {
       });
     });
     server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      resolveP({ port, server, chunks, timings });
+      const addr = server.address();
+      if (addr === null || typeof addr === 'string') {
+        throw new Error('failed to bind mock upstream');
+      }
+      resolveP({ port: (addr as AddressInfo).port, server, chunks, timings });
     });
   });
 }
 
-async function get(url) {
+interface GetResponse {
+  status: number;
+  headers: http.IncomingHttpHeaders;
+  body: string;
+  chunks: Buffer[];
+  timings: number[];
+}
+
+function get(url: string): Promise<GetResponse> {
   return new Promise((resolveP, rejectP) => {
-    http.get(url, (res) => {
-      const chunks = [];
-      const timings = [];
-      res.on('data', (c) => {
-        chunks.push(c);
-        timings.push(Date.now());
-      });
-      res.on('end', () => {
-        resolveP({
-          status: res.statusCode,
-          headers: res.headers,
-          body: Buffer.concat(chunks).toString('utf8'),
-          chunks,
-          timings,
+    http
+      .get(url, (res) => {
+        const chunks: Buffer[] = [];
+        const timings: number[] = [];
+        res.on('data', (c: Buffer) => {
+          chunks.push(c);
+          timings.push(Date.now());
         });
-      });
-      res.on('error', rejectP);
-    }).on('error', rejectP);
+        res.on('end', () => {
+          resolveP({
+            status: res.statusCode ?? 0,
+            headers: res.headers,
+            body: Buffer.concat(chunks).toString('utf8'),
+            chunks,
+            timings,
+          });
+        });
+        res.on('error', rejectP);
+      })
+      .on('error', rejectP);
   });
 }
 
-async function post(url, body, headers = {}) {
+interface PostResponse {
+  status: number;
+  headers: http.IncomingHttpHeaders;
+  body: string;
+  chunks: Buffer[];
+  timings: number[];
+}
+
+function post(
+  url: string,
+  body: string | Buffer,
+  extraHeaders: Record<string, string> = {},
+): Promise<PostResponse> {
   return new Promise((resolveP, rejectP) => {
     const data = typeof body === 'string' ? Buffer.from(body) : body;
     const req = http.request(
@@ -80,19 +121,19 @@ async function post(url, body, headers = {}) {
         method: 'POST',
         headers: {
           'content-length': data.length,
-          ...headers,
+          ...extraHeaders,
         },
       },
       (res) => {
-        const chunks = [];
-        const timings = [];
-        res.on('data', (c) => {
+        const chunks: Buffer[] = [];
+        const timings: number[] = [];
+        res.on('data', (c: Buffer) => {
           chunks.push(c);
           timings.push(Date.now());
         });
         res.on('end', () => {
           resolveP({
-            status: res.statusCode,
+            status: res.statusCode ?? 0,
             headers: res.headers,
             body: Buffer.concat(chunks).toString('utf8'),
             chunks,
@@ -109,30 +150,29 @@ async function post(url, body, headers = {}) {
 }
 
 describe('proxy integration', () => {
-  /** @type {import('http').Server} */
-  let upstream;
-  let upstreamPort;
-  let proxy;
-  let proxyServer;
-  let proxyPort;
-  /** @type {string} */
-  let logDir;
+  let upstream: http.Server;
+  let upstreamPort = 0;
+  let proxyServer: http.Server;
+  let proxyPort = 0;
+  let logDir = '';
 
   before(async () => {
     logDir = await mkdtemp(join(tmpdir(), 'prompttrace-int-'));
-    const mock = await startMockUpstream(async ({ res, recordChunk }) => {
+    const mock = await startMockUpstream(({ res, recordChunk }) => {
       res.writeHead(200, {
         'content-type': 'text/event-stream',
         'cache-control': 'no-cache',
       });
-      // Stream 3 chunks over time so we can assert non-buffering.
-      for (let i = 0; i < 3; i++) {
-        await new Promise((r) => setTimeout(r, 25));
-        const chunk = `event: ping\ndata: ${i}\n\n`;
-        res.write(chunk);
-        recordChunk(chunk);
-      }
-      res.end();
+      // Synchronous-style sequencing with awaits.
+      void (async () => {
+        for (let i = 0; i < 3; i++) {
+          await new Promise<void>((r) => setTimeout(r, 25));
+          const chunk = `event: ping\ndata: ${i}\n\n`;
+          res.write(chunk);
+          recordChunk(chunk);
+        }
+        res.end();
+      })();
     });
     upstream = mock.server;
     upstreamPort = mock.port;
@@ -142,9 +182,12 @@ describe('proxy integration', () => {
       insecureTls: false,
       logDir,
     });
-    proxy = app;
-    proxyServer = await listen(proxy, { port: 0, host: '127.0.0.1' });
-    proxyPort = proxyServer.address().port;
+    proxyServer = await listen(app, { port: 0, host: '127.0.0.1' });
+    const addr = proxyServer.address();
+    if (addr === null || typeof addr === 'string') {
+      throw new Error('failed to bind proxy');
+    }
+    proxyPort = (addr as AddressInfo).port;
   });
 
   after(async () => {
@@ -155,10 +198,11 @@ describe('proxy integration', () => {
 
   it('streams chunks back to client (no buffering)', async () => {
     const t0 = Date.now();
-    const res = await post(`http://127.0.0.1:${proxyPort}/v1/messages`, '{}', {
-      'content-type': 'application/json',
-      'x-api-key': 'test-key',
-    });
+    const res = await post(
+      `http://127.0.0.1:${proxyPort}/v1/messages`,
+      '{}',
+      { 'content-type': 'application/json', 'x-api-key': 'test-key' },
+    );
     const totalElapsed = Date.now() - t0;
 
     assert.equal(res.status, 200);
@@ -166,15 +210,9 @@ describe('proxy integration', () => {
     assert.match(res.body, /data: 1/);
     assert.match(res.body, /data: 2/);
 
-    // If we were buffering, totalElapsed would be ~75ms (3 × 25ms wait
-    // before any chunk). With streaming, the client starts receiving
-    // chunks as they arrive, and total elapsed is at least 75ms but
-    // the inter-chunk gaps should be roughly 25ms each.
     assert.ok(res.chunks.length >= 3, 'client should receive ≥3 chunks');
-    if (res.chunks.length >= 2) {
+    if (res.chunks.length >= 2 && res.timings[0] !== undefined && res.timings[1] !== undefined) {
       const gap = res.timings[1] - res.timings[0];
-      // Generous lower bound — just confirm streaming happened and
-      // wasn't collapsed into a single write.
       assert.ok(gap >= 5, `expected a gap between chunks, got ${gap}ms`);
     }
     assert.ok(totalElapsed >= 60, `expected ≥60ms total, got ${totalElapsed}ms`);
@@ -190,8 +228,7 @@ describe('proxy integration', () => {
       'content-type': 'application/json',
       'x-api-key': 'test-key',
     });
-    // Give the logger a moment to flush.
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise<void>((r) => setTimeout(r, 50));
     const file = await readFile(join(logDir, 'system_prompt.txt'), 'utf8');
     assert.match(file, /You are a helpful assistant\./);
   });
@@ -210,13 +247,13 @@ describe('proxy integration', () => {
       'content-type': 'application/json',
       'x-api-key': 'test-key',
     });
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise<void>((r) => setTimeout(r, 50));
     const file = await readFile(join(logDir, 'tools.jsonl'), 'utf8');
-    const lines = file.trim().split('\n').map((l) => JSON.parse(l));
-    const last = lines[lines.length - 1];
+    const lines = file.trim().split('\n').map((l) => JSON.parse(l) as unknown);
+    const last = lines[lines.length - 1] as { tools: Array<{ name: string }> };
     assert.equal(last.tools.length, 2);
-    assert.equal(last.tools[0].name, 'Read');
-    assert.equal(last.tools[1].name, 'Write');
+    assert.equal(last.tools[0]?.name, 'Read');
+    assert.equal(last.tools[1]?.name, 'Write');
   });
 
   it('returns 400 on malformed JSON', async () => {
@@ -226,13 +263,13 @@ describe('proxy integration', () => {
       { 'content-type': 'application/json', 'x-api-key': 'test-key' },
     );
     assert.equal(res.status, 400);
-    const parsed = JSON.parse(res.body);
+    const parsed = JSON.parse(res.body) as { error: string };
     assert.equal(parsed.error, 'invalid_json');
   });
 
   it('forwards x-api-key header to upstream', async () => {
-    let observedKey = null;
-    const capture = await startMockUpstream(async ({ res, headers }) => {
+    let observedKey: string | string[] | undefined = undefined;
+    const capture = await startMockUpstream(({ res, headers }) => {
       observedKey = headers['x-api-key'];
       res.writeHead(204);
       res.end();
@@ -244,7 +281,11 @@ describe('proxy integration', () => {
         logDir,
       });
       const localServer = await listen(localApp, { port: 0, host: '127.0.0.1' });
-      const localPort = localServer.address().port;
+      const localAddr = localServer.address();
+      if (localAddr === null || typeof localAddr === 'string') {
+        throw new Error('failed to bind local proxy');
+      }
+      const localPort = (localAddr as AddressInfo).port;
       try {
         await post(`http://127.0.0.1:${localPort}/v1/messages`, '{}', {
           'content-type': 'application/json',
@@ -260,21 +301,24 @@ describe('proxy integration', () => {
   });
 
   it('preserves the upstream URL path prefix (e.g. /anthropic)', async () => {
-    let observedUrl = null;
-    const capture = await startMockUpstream(async ({ res, url }) => {
+    let observedUrl: string | undefined = undefined;
+    const capture = await startMockUpstream(({ res, url }) => {
       observedUrl = url;
       res.writeHead(200);
       res.end('ok');
     });
     try {
       const localApp = createApp({
-        // Mimic the default — MiniMax exposes the Anthropic API at /anthropic.
         upstreamUrl: `http://127.0.0.1:${capture.port}/anthropic`,
         insecureTls: false,
         logDir,
       });
       const localServer = await listen(localApp, { port: 0, host: '127.0.0.1' });
-      const localPort = localServer.address().port;
+      const localAddr = localServer.address();
+      if (localAddr === null || typeof localAddr === 'string') {
+        throw new Error('failed to bind local proxy');
+      }
+      const localPort = (localAddr as AddressInfo).port;
       try {
         await post(`http://127.0.0.1:${localPort}/v1/messages`, '{}', {
           'content-type': 'application/json',
@@ -296,21 +340,24 @@ describe('proxy integration', () => {
   });
 
   it('returns 502 when upstream is unreachable', async () => {
-    // Pick a port that's almost certainly free, then don't bind it.
     const localApp = createApp({
-      upstreamUrl: 'http://127.0.0.1:1', // port 1 is reserved
+      upstreamUrl: 'http://127.0.0.1:1',
       insecureTls: false,
       logDir,
     });
     const localServer = await listen(localApp, { port: 0, host: '127.0.0.1' });
-    const localPort = localServer.address().port;
+    const localAddr = localServer.address();
+    if (localAddr === null || typeof localAddr === 'string') {
+      throw new Error('failed to bind local proxy');
+    }
+    const localPort = (localAddr as AddressInfo).port;
     try {
       const res = await post(`http://127.0.0.1:${localPort}/v1/messages`, '{}', {
         'content-type': 'application/json',
         'x-api-key': 'test-key',
       });
       assert.equal(res.status, 502);
-      const parsed = JSON.parse(res.body);
+      const parsed = JSON.parse(res.body) as { error: string };
       assert.equal(parsed.error, 'upstream_unreachable');
     } finally {
       localServer.close();
@@ -318,7 +365,7 @@ describe('proxy integration', () => {
   });
 
   it('forwards upstream non-2xx body unchanged', async () => {
-    const mock = await startMockUpstream(async ({ res }) => {
+    const mock = await startMockUpstream(({ res }) => {
       res.writeHead(401, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'unauthorized' }));
     });
@@ -329,14 +376,18 @@ describe('proxy integration', () => {
         logDir,
       });
       const localServer = await listen(localApp, { port: 0, host: '127.0.0.1' });
-      const localPort = localServer.address().port;
+      const localAddr = localServer.address();
+      if (localAddr === null || typeof localAddr === 'string') {
+        throw new Error('failed to bind local proxy');
+      }
+      const localPort = (localAddr as AddressInfo).port;
       try {
         const res = await post(`http://127.0.0.1:${localPort}/v1/messages`, '{}', {
           'content-type': 'application/json',
           'x-api-key': 'wrong',
         });
         assert.equal(res.status, 401);
-        const parsed = JSON.parse(res.body);
+        const parsed = JSON.parse(res.body) as { error: string };
         assert.equal(parsed.error, 'unauthorized');
       } finally {
         localServer.close();

@@ -1,6 +1,6 @@
-// test/config.test.mjs
+// test/config.test.ts
 //
-// Unit tests for src/config.mjs.
+// Unit tests for src/config.ts.
 //
 // All tests pass an explicit `filePath` so the test is deterministic
 // regardless of whether config.json happens to exist in the cwd.
@@ -11,7 +11,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { loadConfig, HOP_BY_HOP_HEADERS } from '../src/config.mjs';
+import { loadConfig, HOP_BY_HOP_HEADERS } from '../src/config.js';
 
 // Path guaranteed not to exist on any platform. Used by tests that
 // want to exercise the "no config.json" path.
@@ -86,14 +86,13 @@ describe('loadConfig — env vars and defaults', () => {
   it('returns a frozen object', () => {
     const cfg = loadConfig({}, NO_FILE);
     assert.throws(() => {
-      cfg.port = 1234;
+      (cfg as { port: number }).port = 1234;
     }, /Cannot assign to read only property/);
   });
 });
 
 describe('loadConfig — config.json file', () => {
-  /** @type {string} */
-  let dir;
+  let dir = '';
 
   before(async () => {
     dir = await mkdtemp(join(tmpdir(), 'prompttrace-cfg-'));
@@ -105,7 +104,11 @@ describe('loadConfig — config.json file', () => {
 
   it('reads upstreamUrl from config.json', async () => {
     const file = join(dir, 'cfg.json');
-    await writeFile(file, JSON.stringify({ upstreamUrl: 'https://other.example.com/v1' }), 'utf8');
+    await writeFile(
+      file,
+      JSON.stringify({ upstreamUrl: 'https://other.example.com/v1' }),
+      'utf8',
+    );
     const cfg = loadConfig({}, file);
     assert.equal(cfg.upstreamUrl, 'https://other.example.com/v1');
     assert.equal(cfg.sources.upstreamUrl, 'file');
@@ -200,8 +203,6 @@ describe('loadConfig — config.json file', () => {
   it('PROMPTTRACE_CONFIG env var picks the file path', async () => {
     const file = join(dir, 'alt.json');
     await writeFile(file, JSON.stringify({ port: 7070 }), 'utf8');
-    // Pass no filePath — env var is the only signal to where the
-    // file lives. (Explicit `filePath` arg always wins over the env.)
     const cfg = loadConfig({ PROMPTTRACE_CONFIG: file });
     assert.equal(cfg.port, 7070);
     assert.equal(cfg.configPath, file);
